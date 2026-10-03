@@ -17,7 +17,7 @@ Dự án này xây dựng một quy trình xử lý dữ liệu trên nền tả
 7. Sử dụng các dịch vụ AWS để lập lịch, ghi nhật ký, quản lý quyền truy cập và gửi thông báo khi quy trình gặp lỗi.
 
 ## Kiến trúc hệ thống
-
+![architecture](docs/airchitect.jpg)
 ```text
 Bộ dữ liệu ngân hàng từ Kaggle (CSV)
                   |

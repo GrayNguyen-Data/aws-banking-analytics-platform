@@ -1,0 +1,58 @@
+# ========================================================
+# 1. BẢO MẬT & THÔNG TIN BÍ MẬT (TUYỆT ĐỐI KHÔNG COMMIT)
+# ========================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+aws_credentials
+
+# ========================================================
+# 2. PYTHON & MÔI TRƯỜNG ẢO
+# ========================================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# ========================================================
+# 3. DỮ LIỆU THÔ (LƯU TRÊN AWS S3 DATA LAKE)
+# ========================================================
+data/raw/*.csv
+data/raw/*.parquet
+data/raw/*.json
+data/raw/*.zip
+data/raw/*.gz
+!data/raw/.gitkeep
+
+# ========================================================
+# 4. JUPYTER NOTEBOOKS
+# ========================================================
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# ========================================================
+# 5. TESTING & ARTIFACTS
+# ========================================================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ========================================================
+# 6. IDE & HỆ ĐIỀU HÀNH
+# ========================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store

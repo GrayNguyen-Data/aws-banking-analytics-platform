@@ -1,33 +1,30 @@
-"""
-AWS Lambda Handler: Clean & Load Staging
-========================================
-Serverless function được kích hoạt bởi EventBridge / S3 / Step Functions để nạp
-dữ liệu từ S3 Data Lake vào RDS PostgreSQL Staging schema bằng streaming COPY.
-"""
-
 import os
 import io
-import json
-import logging
+import sys
+import time
 from datetime import datetime, timezone
 import pandas as pd
 import psycopg2
 import boto3
+from dotenv import load_dotenv
 
-# Cấu hình Logger để đẩy log lên AWS CloudWatch
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Đảm bảo in tiếng Việt trên console Windows không bị lỗi font
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
 
-# Đọc cấu hình từ AWS Lambda Environment Variables
+load_dotenv()
+
+# Cấu hình AWS S3 & RDS PostgreSQL
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
 BUCKET_NAME = os.getenv("AWS_S3_BUCKET")
+INGEST_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
 DB_HOST = os.getenv("DB_HOST") or os.getenv("RDS_HOST")
 DB_PORT = os.getenv("DB_PORT") or os.getenv("RDS_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME") or os.getenv("RDS_DATABASE", "banking_dwh")
 DB_USER = os.getenv("DB_USER") or os.getenv("RDS_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD") or os.getenv("RDS_PASSWORD")
 
-# Metadata cấu hình 7 bảng Staging
 TABLE_CONFIGS = [
     {
         "table_name": "branches",
@@ -75,12 +72,12 @@ TABLE_CONFIGS = [
         "columns": ["transaction_id", "account_id", "merchant_id", "amount_usd", "transaction_date"],
         "dtype": {"transaction_id": str, "account_id": str, "merchant_id": str, "amount_usd": float},
         "datetime_cols": ["transaction_date"],
-        "chunksize": 250000
+        "chunksize": 250000  # Chia 1 triệu dòng thành các mảng 250k dòng để không bị tràn RAM
     }
 ]
 
 def get_db_connection():
-    """Tạo kết nối tới PostgreSQL RDS qua SSL"""
+    """Tạo kết nối tới PostgreSQL RDS với mã hóa SSL"""
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -91,15 +88,18 @@ def get_db_connection():
     )
 
 def clean_dataframe(df: pd.DataFrame, config: dict) -> pd.DataFrame:
-    """Làm sạch và chuẩn hóa dữ liệu"""
-    for col in df.select_dtypes(include=["object", "string"]).columns:
+    """Làm sạch và chuẩn hóa dữ liệu trước khi nạp"""
+    # 1. Loại bỏ khoảng trắng thừa đầu/cuối của các cột chuỗi
+    for col in df.select_dtypes(include=["object"]).columns:
         df[col] = df[col].astype(str).str.strip()
 
+    # 2. Chuẩn hóa cột ngày tháng dạng YYYY-MM-DD
     if "date_cols" in config:
         for col in config["date_cols"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
 
+    # 3. Chuẩn hóa cột thời gian dạng YYYY-MM-DD HH:MM:SS
     if "datetime_cols" in config:
         for col in config["datetime_cols"]:
             if col in df.columns:
@@ -108,65 +108,87 @@ def clean_dataframe(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     return df
 
 def copy_df_to_postgres(cursor, df: pd.DataFrame, table_name: str, columns: list):
-    """Nạp nhanh bằng COPY FROM STDIN qua bộ nhớ RAM StringIO"""
+    """Nạp DataFrame vào Postgres bằng giao thức COPY siêu tốc qua RAM"""
     output = io.StringIO()
     df.to_csv(output, sep="\t", header=False, index=False, na_rep="\\N", columns=columns)
     output.seek(0)
+    
     cols_str = ", ".join(columns)
     sql = f"COPY {table_name} ({cols_str}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', NULL '\\N')"
     cursor.copy_expert(sql, output)
 
-def lambda_handler(event, context):
-    """Entry Point chính của AWS Lambda"""
-    # Lấy ngày từ event (hoặc mặc định lấy ngày hôm nay)
-    ingest_date = event.get("ingest_date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+def run_staging_pipeline():
+    start_total = time.time()
     s3_client = boto3.client("s3", region_name=AWS_REGION)
     
-    logger.info(f"Bắt đầu Staging ETL Pipeline cho mẻ ngày: {ingest_date}")
+    print("=" * 80)
+    print("🚀 BẮT ĐẦU ETL PIPELINE: S3 DATA LAKE --> RDS POSTGRESQL STAGING")
+    print(f"📅 Mẻ Ingestion Date: {INGEST_DATE}")
+    print(f"🗄️ Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print("=" * 80)
+
     conn = get_db_connection()
     conn.autocommit = False
     cursor = conn.cursor()
 
-    results = {}
     try:
         for config in TABLE_CONFIGS:
             table_name = config["table_name"]
             stg_table = config["stg_table"]
             columns = config["columns"]
-            s3_key = f"raw/{table_name}/ingest_date={ingest_date}/{table_name}.csv"
+            s3_key = f"raw/{table_name}/ingest_date={INGEST_DATE}/{table_name}.csv"
 
+            print(f"\n📦 [1/3] Đang xử lý bảng: {table_name.upper()}...")
+            start_table = time.time()
+
+            # 1. Truncate bảng staging trước khi nạp mẻ mới
             cursor.execute(f"TRUNCATE TABLE {stg_table};")
+
+            # 2. Đọc file từ S3
             response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
             csv_body = response["Body"]
 
-            total_loaded = 0
+            total_rows_loaded = 0
+
+            # 3. Nạp dữ liệu (xử lý chunk nếu là bảng transactions)
             if "chunksize" in config:
+                print(f"   ⏳ Đang đọc và nạp theo Chunk ({config['chunksize']:,} dòng/chunk)...")
                 for chunk in pd.read_csv(csv_body, dtype=config.get("dtype"), chunksize=config["chunksize"]):
                     chunk = clean_dataframe(chunk, config)
                     copy_df_to_postgres(cursor, chunk, stg_table, columns)
-                    total_loaded += len(chunk)
+                    total_rows_loaded += len(chunk)
+                    print(f"      -> Đã nạp tích lũy: {total_rows_loaded:,} dòng...")
             else:
                 df = pd.read_csv(csv_body, dtype=config.get("dtype"))
                 df = clean_dataframe(df, config)
                 copy_df_to_postgres(cursor, df, stg_table, columns)
-                total_loaded = len(df)
+                total_rows_loaded = len(df)
 
             conn.commit()
-            results[stg_table] = total_loaded
-            logger.info(f"Đã nạp {total_loaded:,} dòng vào {stg_table}")
+            elapsed_table = time.time() - start_table
+            print(f"   ✅ Hoàn tất [{stg_table}]: {total_rows_loaded:,} dòng trong {elapsed_table:.2f} giây.")
 
-        return {
-            "statusCode": 200,
-            "body": json.dumps({
-                "message": "Staging ETL completed successfully",
-                "ingest_date": ingest_date,
-                "loaded_rows": results
-            })
-        }
+        # 4. Kiểm tra đối soát số lượng bản ghi sau khi nạp
+        print("\n" + "=" * 80)
+        print("🔍 KIỂM TRA SỐ LƯỢNG BẢN GHI TRONG CÁC BẢNG STAGING:")
+        print("=" * 80)
+        for config in TABLE_CONFIGS:
+            stg_table = config["stg_table"]
+            cursor.execute(f"SELECT COUNT(*) FROM {stg_table};")
+            count = cursor.fetchone()[0]
+            print(f" - {stg_table:28}: {count:,} dòng")
+
+        print("=" * 80)
+        print(f"🎉 HOÀN TẤT TOÀN BỘ STAGING PIPELINE TRONG {time.time() - start_total:.2f} GIÂY!")
+        print("=" * 80)
+
     except Exception as e:
         conn.rollback()
-        logger.error(f"Lỗi Staging ETL: {e}", exc_info=True)
+        print(f"\n❌ LỖI TRONG QUÁ TRÌNH THỰC HIỆN PIPELINE: {e}")
         raise e
     finally:
         cursor.close()
         conn.close()
+
+if __name__ == "__main__":
+    run_staging_pipeline()

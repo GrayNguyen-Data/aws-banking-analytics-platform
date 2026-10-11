@@ -1,0 +1,14 @@
+{
+  "Name": "daily-banking-dwh-pipeline-trigger",
+  "Description": "Lên lịch tự động kích hoạt End-to-End Banking Data Pipeline vào lúc 02:00 AM UTC mỗi ngày",
+  "ScheduleExpression": "cron(0 2 * * ? *)",
+  "State": "ENABLED",
+  "EventPattern": null,
+  "Targets": [
+    {
+      "Id": "TriggerCleanLoadStagingLambda",
+      "Arn": "arn:aws:lambda:ap-southeast-1:YOUR_ACCOUNT_ID:function:clean_load_staging",
+      "Input": "{\"source\": \"aws.events\", \"detail-type\": \"Scheduled Event\", \"pipeline\": \"daily_batch\"}"
+    }
+  ]
+}

@@ -17,7 +17,24 @@ load_dotenv()
 # Cấu hình AWS S3 & RDS PostgreSQL
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
 BUCKET_NAME = os.getenv("AWS_S3_BUCKET")
-INGEST_DATE = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+INGEST_DATE = os.getenv("INGEST_DATE")
+
+
+def get_latest_s3_ingest_date(s3_client, bucket_name: str) -> str:
+    """Tự động tìm kiếm partition ingest_date mới nhất trên S3"""
+    try:
+        resp = s3_client.list_objects_v2(Bucket=bucket_name, Prefix="raw/branches/", Delimiter="/")
+        prefixes = [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
+        dates = []
+        for p in prefixes:
+            if "ingest_date=" in p:
+                d_str = p.split("ingest_date=")[-1].strip("/")
+                dates.append(d_str)
+        if dates:
+            return sorted(dates)[-1]
+    except Exception as e:
+        print(f"⚠️ Không thể quét partition S3 tự động: {e}")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 DB_HOST = os.getenv("DB_HOST") or os.getenv("RDS_HOST")
 DB_PORT = os.getenv("DB_PORT") or os.getenv("RDS_PORT", "5432")
@@ -121,9 +138,11 @@ def run_staging_pipeline():
     start_total = time.time()
     s3_client = boto3.client("s3", region_name=AWS_REGION)
     
+    ingest_date = INGEST_DATE or get_latest_s3_ingest_date(s3_client, BUCKET_NAME)
+    
     print("=" * 80)
     print("🚀 BẮT ĐẦU ETL PIPELINE: S3 DATA LAKE --> RDS POSTGRESQL STAGING")
-    print(f"📅 Mẻ Ingestion Date: {INGEST_DATE}")
+    print(f"📅 Mẻ Ingestion Date: {ingest_date}")
     print(f"🗄️ Database: {DB_HOST}:{DB_PORT}/{DB_NAME}")
     print("=" * 80)
 
@@ -136,7 +155,7 @@ def run_staging_pipeline():
             table_name = config["table_name"]
             stg_table = config["stg_table"]
             columns = config["columns"]
-            s3_key = f"raw/{table_name}/ingest_date={INGEST_DATE}/{table_name}.csv"
+            s3_key = f"raw/{table_name}/ingest_date={ingest_date}/{table_name}.csv"
 
             print(f"\n📦 [1/3] Đang xử lý bảng: {table_name.upper()}...")
             start_table = time.time()

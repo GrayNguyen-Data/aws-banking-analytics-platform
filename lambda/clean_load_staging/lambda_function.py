@@ -116,11 +116,28 @@ def copy_df_to_postgres(cursor, df: pd.DataFrame, table_name: str, columns: list
     sql = f"COPY {table_name} ({cols_str}) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', NULL '\\N')"
     cursor.copy_expert(sql, output)
 
+def get_latest_s3_ingest_date(s3_client, bucket_name: str) -> str:
+    """Tự động tìm kiếm partition ingest_date mới nhất trên S3"""
+    try:
+        resp = s3_client.list_objects_v2(Bucket=bucket_name, Prefix="raw/branches/", Delimiter="/")
+        prefixes = [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
+        dates = []
+        for p in prefixes:
+            if "ingest_date=" in p:
+                d_str = p.split("ingest_date=")[-1].strip("/")
+                dates.append(d_str)
+        if dates:
+            return sorted(dates)[-1]
+    except Exception as e:
+        logger.warning(f"Không thể quét partition S3 tự động: {e}")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
 def lambda_handler(event, context):
     """Entry Point chính của AWS Lambda"""
-    # Lấy ngày từ event (hoặc mặc định lấy ngày hôm nay)
-    ingest_date = event.get("ingest_date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     s3_client = boto3.client("s3", region_name=AWS_REGION)
+    # Lấy ngày từ event hoặc tự động lấy partition mới nhất trên S3
+    ingest_date = event.get("ingest_date") or get_latest_s3_ingest_date(s3_client, BUCKET_NAME)
     
     logger.info(f"Bắt đầu Staging ETL Pipeline cho mẻ ngày: {ingest_date}")
     conn = get_db_connection()
